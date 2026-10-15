@@ -24,7 +24,6 @@ class SstableView {
 
   // Verifies magic and checksum, then builds the index.
   static Status Parse(std::string data, SstableView* view);
-  static Status ParseBloomFilter(std::string data, BloomFilter* bloomfilter_);
 
   GetResult Get(const std::string& key, std::string* value) const;
   size_t entry_count() const { return index_.size(); }

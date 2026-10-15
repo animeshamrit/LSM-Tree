@@ -182,7 +182,7 @@ TEST_F(FlushTest, FlushWritesSstableAndRotatesWal) {
   ASSERT_TRUE(db_->Put("a", "1").ok());
   ASSERT_TRUE(FlushDb().ok());
   EXPECT_EQ(Ssts(), std::vector<uint64_t>{1});      // sst-N from wal-N
-  //EXPECT_EQ(Wals(), std::vector<uint64_t>{n + 1});  // old WAL gone, new one live
+  EXPECT_EQ(Wals(), std::vector<uint64_t>{n + 1});  // old WAL gone, new one live
 }
 
 TEST_F(FlushTest, DataReadableAfterFlush) {
@@ -708,7 +708,11 @@ TEST_F(FlushTest, CorruptSstableFailsOpen) {
     f.put(c);
   }
   std::unique_ptr<LSMDB> db;
-  EXPECT_FALSE(OpenDb(dir_, 0, &db).ok()) << "silently dropping an SSTable loses data";
+  ASSERT_TRUE(OpenDb(dir_, 0, &db).ok());  // open reads only the filters
+  std::string v;
+  Status s = db->Get("key100", &v);
+  EXPECT_FALSE(s.ok());
+  EXPECT_FALSE(s.IsNotFound()) << "corruption must not look like a missing key";
 }
 
 TEST_F(FlushTest, UnrelatedAndMalformedNamesAreIgnored) {

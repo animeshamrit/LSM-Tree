@@ -128,7 +128,9 @@ class AsyncFlushTest : public ::testing::Test {
   }
   void ExpectMissing(const std::string& k) {
     std::string out;
-    EXPECT_TRUE(db_->Get(k, &out).IsNotFound()) << "key " << k;
+    Status s = db_->Get(k, &out);
+    EXPECT_TRUE(s.IsNotFound()) << "status: " << s.message() << " key: " << k;
+    //EXPECT_TRUE(db_->Get(k, &out).IsNotFound()) << "key " << k;
   }
   static std::string Key(int i) {
     char buf[16];

@@ -46,13 +46,12 @@ Status ReadSstableFile(const std::string& path, SstableView* view ) {
 }
 
 Status ReadBloomFilterBlock(const std::string& path, BloomFilterView* bloomfilter_ ) {
-//   *result = WalReadResult();
 
     int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) return Status::IOError("open " + path + ": " + std::strerror(errno));
 
-    off_t current_pos = lseek(fd, -40, SEEK_END);
-    if (current_pos == (off_t)-1) {
+    off_t footer_start = lseek(fd, -40, SEEK_END);
+    if (footer_start == (off_t)-1) {
         close(fd);
         Status s = Status::IOError("read " + path + ": " + "Seek to end failed!");
         return s;
@@ -75,10 +74,19 @@ Status ReadBloomFilterBlock(const std::string& path, BloomFilterView* bloomfilte
     }
 
     uint64_t BloomFilter_offset = GetFixed64(&footer_buffer[0]);
-    off_t file_size = lseek(fd, 0, SEEK_END);
-    off_t footer_start = file_size - 40;
 
-    uint64_t BloomFilter_size = footer_start - BloomFilter_offset;
+    off_t bloomfilter_start_pos = lseek(fd, BloomFilter_offset, SEEK_SET);
+    if (bloomfilter_start_pos == (off_t)-1) {
+        close(fd);
+        Status s = Status::IOError("read " + path + ": " + "Seek to start failed!");
+        return s;
+    }
+
+    if (BloomFilter_offset > static_cast<uint64_t>(footer_start)) {
+        close(fd);
+        return Status::Corruption("bad bloom offset");
+    }
+    uint64_t BloomFilter_size = footer_start - bloomfilter_start_pos + 8 + 4;  // data should contain crc checksum
 
     std::string data;
     data.resize(BloomFilter_size);

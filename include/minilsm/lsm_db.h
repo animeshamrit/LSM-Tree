@@ -25,7 +25,7 @@ private:
   bool sync_;
   uint64_t next_sst_number_ = 1;
   std::vector<uint64_t> live_wals_;  // the numbers of the WALs that are still live
-  std::vector<SstableView> sstables_;
+  std::deque<SstableView> sstables_;
   std::vector<BloomFilter> bloomfilters_;
 
   std::queue<std::function<void()>> bg_queue_;
@@ -36,6 +36,7 @@ private:
   std::mutex status_mutex_;
   std::mutex queue_mutex_;
   std::mutex wal_mutex_;  
+  std::mutex sstable_mutex;
   std::condition_variable queue_cv_;
   std::thread bg_thread_;
   bool shutdown_ = false;

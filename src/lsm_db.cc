@@ -4,6 +4,7 @@
 #include "minilsm/wal_record.h"
 #include "minilsm/sstable_writer.h"
 #include "minilsm/sstable_reader.h"
+#include "minilsm/bloomfilter.h"
 
 #include <filesystem>
 #include <system_error>
@@ -139,22 +140,23 @@ Status LSMDB::Open(const std::string& dir, bool sync,
   Status s = ScanDirectory(dir, &ssts, &wals);
   if (!s.ok()) return s;
 
-//   for (uint64_t n : ssts) {
-//     BloomFilterView bloomfilter_view;
-//     s = ReadBloomFilterBlock(SstPath(dir, n), &bloomfilter_view);
-//     if (!s.ok()) return s;
-//     BloomFilter bloomfilter_(bloomfilter_view.num_bits_, bloomfilter_view.num_hashes_, bloomfilter_view.bits_);
-//     db->bloomfilters_.push_back(std::move(bloomfilter_));
-//   }  
-  //db->next_sst_number_ = ssts.empty() ? 1 : ssts.back() + 1;
-
   for (uint64_t n : ssts) {
-    SstableView view;
-    s = ReadSstableFile(SstPath(dir, n), &view);
+    BloomFilterView bloomfilter_view;
+    s = ReadBloomFilterBlock(SstPath(dir, n), &bloomfilter_view);
     if (!s.ok()) return s;
-    db->sstables_.push_back(std::move(view));
-  }
+    BloomFilter bloomfilter_(bloomfilter_view.num_bits_, bloomfilter_view.num_hashes_, bloomfilter_view.bits_);
+    bloomfilter_.sst_filenum =  n;
+    db->bloomfilters_.push_back(std::move(bloomfilter_));
+  }  
   db->next_sst_number_ = ssts.empty() ? 1 : ssts.back() + 1;
+
+//   for (uint64_t n : ssts) {
+//     SstableView view;
+//     s = ReadSstableFile(SstPath(dir, n), &view);
+//     if (!s.ok()) return s;
+//     db->sstables_.push_back(std::move(view));
+//   }
+//   db->next_sst_number_ = ssts.empty() ? 1 : ssts.back() + 1;
 
   for (size_t i = 0; i < wals.size(); ++i) {
     const std::string wal_path = WalPath(dir, wals[i]);
@@ -232,8 +234,18 @@ Status LSMDB::FlushMemTableToSstable() {
     {
         bloomfilter.add(it.key);
     }
+
+    uint64_t current_sst_number_ = next_sst_number_;
+    {
+        std::lock_guard<std::mutex> lock(sstable_mutex);
+        bloomfilter.sst_filenum = next_sst_number_;
+        next_sst_number_++;
+    }
+
     std::string bloomfilter_bits;
     bloomfilter.serialize(bloomfilter_bits);
+
+    bloomfilters_.push_back(std::move(bloomfilter));
 
     std::string sstable_data;
     Status s = BuildSstable(entries, bloomfilter_bits, &sstable_data);
@@ -249,16 +261,21 @@ Status LSMDB::FlushMemTableToSstable() {
     if(!s.ok()) {
         return s; 
     }
-    sstables_.push_back(std::move(view));
+
+    {
+        std::lock_guard<std::mutex> lock(sstable_mutex);
+        sstables_.push_back(std::move(view));
+    }
+
     uint64_t current_wal_number;
     {
         std::lock_guard<std::mutex> lock(wal_mutex_);
         current_wal_number = live_wals_.back();
     }
-    
-    SubmitBackgroundTask([this, sstable_data, current_wal_number]() {
+
+    SubmitBackgroundTask([this, sstable_data, current_wal_number, current_sst_number_]() {
         std::unique_ptr<SstableWriter> w;
-        const std::string path = SstPath(this->dir_, this->next_sst_number_);
+        const std::string path = SstPath(this->dir_, current_sst_number_);
         
         Status s = SstableWriter::Open(path, &w);
         if (!s.ok()) 
@@ -275,7 +292,10 @@ Status LSMDB::FlushMemTableToSstable() {
         }
 
         w->Close();
-        this->next_sst_number_++; 
+        {
+            std::lock_guard<std::mutex> lock(sstable_mutex);
+            this->sstables_.pop_front();
+        }
         this->ClearWal(current_wal_number);
     });
 
@@ -336,22 +356,41 @@ Status LSMDB::Get(const std::string& key, std::string* value) {
   Status state_check = CheckDatabaseState();
   if (!state_check.ok()) return state_check;
 
-  switch (memtable_.Get(key, value)) {
-    case MemTable::GetResult::kFound:
-      return Status::OK();
-    case MemTable::GetResult::kDeleted:
-      return Status::NotFound("deleted");
-    case MemTable::GetResult::kNotPresent:
-      for (auto it = sstables_.rbegin(); it != sstables_.rend(); ++it) {   // newest first
-        switch (it->Get(key, value)) {
-            case SstableView::GetResult::kFound:   return Status::OK();
-            case SstableView::GetResult::kDeleted: return Status::NotFound("deleted");
-            case SstableView::GetResult::kNotPresent: break;   // try the next older file
-        }
-        }
-      return Status::NotFound();
+  MemTable::GetResult mem = memtable_.Get(key, value);
+  if (mem == MemTable::GetResult::kFound) return Status::OK();
+  if (mem == MemTable::GetResult::kDeleted) return Status::NotFound("deleted");
+
+  size_t skip ;
+  {
+    std::lock_guard<std::mutex> lock(sstable_mutex);
+    skip = sstables_.size();
+    for (auto it = sstables_.rbegin(); it != sstables_.rend(); ++it) {  // newest first
+    SstableView::GetResult r = it->Get(key, value);
+    if (r == SstableView::GetResult::kFound) return Status::OK();
+    if (r == SstableView::GetResult::kDeleted) return Status::NotFound("deleted");
+    // kNotPresent: fall through to the next older table
+    }
   }
-  return Status::Corruption("unreachable");
+
+  for (auto it = bloomfilters_.rbegin(); it != bloomfilters_.rend(); ++it) {  // newest first
+    if(skip > 0)
+    {
+        skip--;
+        continue;
+    }
+    bool can_be_present = it->may_contain(key);
+    if(can_be_present)
+    {
+        SstableView view;
+        Status s = ReadSstableFile(SstPath(dir_, it->sst_filenum), &view);
+        if (!s.ok()) return s;
+
+        SstableView::GetResult r = view.Get(key, value);
+        if (r == SstableView::GetResult::kFound) return Status::OK();
+        if (r == SstableView::GetResult::kDeleted) return Status::NotFound("deleted");
+    }
+  }
+  return Status::NotFound();
 }
 
 

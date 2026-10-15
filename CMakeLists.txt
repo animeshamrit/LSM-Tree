@@ -89,3 +89,11 @@ gtest_discover_tests(lsmdb_flush_test)
 add_executable(lsmdb_async_test tests/lsmdb_async_test.cc)
 target_link_libraries(lsmdb_async_test minilsm GTest::gtest_main)
 gtest_discover_tests(lsmdb_async_test)
+
+add_executable(sstable_test tests/sstable_test.cc)
+target_link_libraries(sstable_test minilsm GTest::gtest_main)
+gtest_discover_tests(sstable_test)
+
+add_executable(bloomfilter_test tests/bloomfilter_test.cc)
+target_link_libraries(bloomfilter_test minilsm GTest::gtest_main)
+gtest_discover_tests(bloomfilter_test)

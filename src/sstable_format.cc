@@ -1,6 +1,7 @@
 #include "minilsm/sstable_format.h"
 
 #include <algorithm>
+#include <iostream>
 
 #include "minilsm/coding.h"
 #include "minilsm/crc32.h"
