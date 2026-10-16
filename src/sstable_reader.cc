@@ -74,17 +74,16 @@ Status ReadBloomFilterBlock(const std::string& path, BloomFilterView* bloomfilte
     }
 
     uint64_t BloomFilter_offset = GetFixed64(&footer_buffer[0]);
+    if (BloomFilter_offset > static_cast<uint64_t>(footer_start)) {
+        close(fd);
+        return Status::Corruption("bad bloom offset");
+    }
 
     off_t bloomfilter_start_pos = lseek(fd, BloomFilter_offset, SEEK_SET);
     if (bloomfilter_start_pos == (off_t)-1) {
         close(fd);
         Status s = Status::IOError("read " + path + ": " + "Seek to start failed!");
         return s;
-    }
-
-    if (BloomFilter_offset > static_cast<uint64_t>(footer_start)) {
-        close(fd);
-        return Status::Corruption("bad bloom offset");
     }
     uint64_t BloomFilter_size = footer_start - bloomfilter_start_pos + 8 + 4;  // data should contain crc checksum
 

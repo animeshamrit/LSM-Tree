@@ -545,55 +545,47 @@ TEST_F(FlushTest, ReopenAfterFailedFlushRecoversAndNextFlushSucceeds) {
 // Once sst-N is durable the data is safe. If the next WAL cannot be created we
 // keep appending to wal-N, and a restart replays wal-N in full, so nothing is
 // lost. (Replaying the flushed part again only duplicates it.)
-TEST_F(FlushTest, WalRotationFailureDoesNotLoseWrites) {
+TEST_F(FlushTest, WalRotationFailureHaltsAndKeepsData) {
   Open();
   const uint64_t n = CurrentWal();
   ASSERT_TRUE(db_->Put("a", "1").ok());
   Block(WalP(n + 1));                          // opening the next WAL fails
-  ASSERT_NO_FATAL_FAILURE(FlushAndWaitForSst(1));
-  EXPECT_EQ(Wals(), std::vector<uint64_t>{n}); // old WAL kept; ClearWal had nothing to remove
-  Expect("a", "1");
-  ASSERT_TRUE(db_->Put("b", "2").ok());        // goes to the old WAL
-  Expect("b", "2");
+  EXPECT_FALSE(db_->FlushMemTableToSstable().ok());
+  EXPECT_FALSE(db_->Put("b", "2").ok());       // halted: nothing goes into the old WAL
   Close();
   Unblock(WalP(n + 1));
   Open();
-  Expect("a", "1");
-  Expect("b", "2");
+  Expect("a", "1");                            // replayed from wal-n
+  ExpectMissing("b");
   EXPECT_EQ(Wals(), std::vector<uint64_t>{n});
-  ASSERT_TRUE(FlushDb().ok());                 // rotates for real, removes the old WAL
-  EXPECT_EQ(Wals(), std::vector<uint64_t>{n + 1});
-  EXPECT_EQ(Ssts().size(), 2u);
-  Expect("a", "1");
-  Expect("b", "2");
 }
 
-TEST_F(FlushTest, DeleteAfterFailedRotationIsNotLost) {
+TEST_F(FlushTest, DeleteAfterFailedRotationIsRejectedAndNotLogged) {
   Open();
   const uint64_t n = CurrentWal();
   ASSERT_TRUE(db_->Put("a", "1").ok());
-  Block(WalP(n + 1));
-  ASSERT_NO_FATAL_FAILURE(FlushAndWaitForSst(1));
-  ASSERT_TRUE(db_->Delete("a").ok());
-  ExpectMissing("a");
+  Block(WalP(n + 1));                              // opening the next WAL fails
+  EXPECT_FALSE(db_->FlushMemTableToSstable().ok()); // rotation fails, database halts
+  EXPECT_FALSE(db_->Delete("a").ok());              // halted: the delete is rejected
   Close();
   Unblock(WalP(n + 1));
   Open();
-  ExpectMissing("a");                          // replay: Put(a), Delete(a) -> deleted
+  Expect("a", "1");                                 // the delete never reached the WAL
+  EXPECT_TRUE(Ssts().empty());                      // no SSTable was written
 }
 
 TEST_F(FlushTest, RestartAfterFailedRotationRecoversCleanly) {
   Open();
   const uint64_t n = CurrentWal();
   ASSERT_TRUE(db_->Put("a", "1").ok());
-  Block(WalP(n + 1));
-  ASSERT_NO_FATAL_FAILURE(FlushAndWaitForSst(1));
+  Block(WalP(n + 1));                              // opening the next WAL fails
+  EXPECT_FALSE(db_->FlushMemTableToSstable().ok()); // rotation fails, database halts
   Close();
   Unblock(WalP(n + 1));
   Open();
-  Expect("a", "1");
-  EXPECT_EQ(Ssts(), std::vector<uint64_t>{1});
-  EXPECT_EQ(Wals(), std::vector<uint64_t>{n});
+  Expect("a", "1");                                // replayed from wal-n
+  EXPECT_TRUE(Ssts().empty());                     // no SSTable was written
+  EXPECT_EQ(Wals(), std::vector<uint64_t>{n});     // old WAL kept
 }
 
 // ----------------------------------------------------------- crash windows

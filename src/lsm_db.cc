@@ -183,7 +183,7 @@ Status LSMDB::Open(const std::string& dir, bool sync,
                     return Status::IOError("truncate " + wal_path + ": " + ec.message());
                 }
             }
-        db->recovery_dropped_bytes_ = res.file_size - res.valid_bytes;
+        db->recovery_dropped_bytes_ += res.file_size - res.valid_bytes;
         }
     }
 }
@@ -202,8 +202,10 @@ Status LSMDB::RotateWal() {
   const uint64_t next_number = live_wals_.back() + 1;
   std::unique_ptr<WalWriter> next;
   Status s = WalWriter::Open(WalPath(dir_, next_number), sync_, &next);
-  if (!s.ok()) return s;  // nothing changed: keep appending to the old WAL
- 
+  if (!s.ok()){
+    PanicDatabase(s);
+    return s;  // nothing changed: keep appending to the old WAL
+  }
   wal_ = std::move(next);
   live_wals_.push_back(next_number);
   return Status::OK();
@@ -225,27 +227,18 @@ Status LSMDB::FlushMemTableToSstable() {
     Status state_check = CheckDatabaseState();
     if (!state_check.ok()) return state_check;
 
-    if (memtable_.Snapshot().empty()) {
+    std::vector<SstEntry> entries = memtable_.Snapshot();
+    if (entries.empty()) {
         return Status::OK();  // nothing to flush
     }
-    std::vector<SstEntry> entries = memtable_.Snapshot();
     BloomFilter bloomfilter(entries.size());
     for(auto it:entries)
     {
         bloomfilter.add(it.key);
     }
 
-    uint64_t current_sst_number_ = next_sst_number_;
-    {
-        std::lock_guard<std::mutex> lock(sstable_mutex);
-        bloomfilter.sst_filenum = next_sst_number_;
-        next_sst_number_++;
-    }
-
     std::string bloomfilter_bits;
     bloomfilter.serialize(bloomfilter_bits);
-
-    bloomfilters_.push_back(std::move(bloomfilter));
 
     std::string sstable_data;
     Status s = BuildSstable(entries, bloomfilter_bits, &sstable_data);
@@ -253,20 +246,27 @@ Status LSMDB::FlushMemTableToSstable() {
         return s;
     }
 
-    memtable_ = MemTable();
-    RotateWal();  // start a new WAL for subsequent writes
-
     SstableView view;
     s = SstableView::Parse(sstable_data, &view);
     if(!s.ok()) {
         return s; 
     }
 
+    uint64_t current_sst_number_ ;
     {
         std::lock_guard<std::mutex> lock(sstable_mutex);
+        current_sst_number_ = next_sst_number_++;
+        bloomfilter.sst_filenum = current_sst_number_;
+        bloomfilters_.push_back(std::move(bloomfilter));
         sstables_.push_back(std::move(view));
     }
 
+    memtable_ = MemTable();
+    s = RotateWal();  // start a new WAL for subsequent writes
+    if(!s.ok()){
+        return s;
+    }
+    
     uint64_t current_wal_number;
     {
         std::lock_guard<std::mutex> lock(wal_mutex_);
@@ -291,7 +291,12 @@ Status LSMDB::FlushMemTableToSstable() {
             return; 
         }
 
-        w->Close();
+        s = w->Close();
+        if (!s.ok()) { 
+            ::unlink(path.c_str()); this->PanicDatabase(s); 
+            return; 
+        }
+
         {
             std::lock_guard<std::mutex> lock(sstable_mutex);
             this->sstables_.pop_front();
@@ -316,14 +321,16 @@ Status LSMDB::Put(const std::string& key, const std::string& value) {
         }
     }
 
-    if (wal_) {
+    state_check = CheckDatabaseState();      //check if wal rotation was successful
+    if (!state_check.ok()) return state_check;
+
+    if (!wal_) return Status::Corruption("no active WAL");
     WalRecord r;
     r.type = WalRecord::Type::kPut;
     r.key = key;
     r.value = value;
     Status s = wal_->Append(r);
     if (!s.ok()) return s;  // WAL first: on failure, memory is untouched
-    }
     memtable_.Put(key, value);
   return Status::OK();
 }
@@ -341,13 +348,15 @@ Status LSMDB::Delete(const std::string& key) {
         }
     } 
 
-    if(wal_) {
-        WalRecord r;
-        r.type = WalRecord::Type::kDelete;
-        r.key = key;
-        Status s = wal_->Append(r);
-        if (!s.ok()) return s;  // WAL first: on failure, memory is untouched
-    }
+    state_check = CheckDatabaseState();      //check if wal rotation was successful
+    if (!state_check.ok()) return state_check;
+
+    if (!wal_) return Status::Corruption("no active WAL");
+    WalRecord r;
+    r.type = WalRecord::Type::kDelete;
+    r.key = key;
+    Status s = wal_->Append(r);
+    if (!s.ok()) return s;  // WAL first: on failure, memory is untouched
     memtable_.Delete(key);
     return Status::OK();
 }
