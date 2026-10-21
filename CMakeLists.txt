@@ -35,7 +35,10 @@ add_library(minilsm
   src/sstable_format.cc
   src/sstable_writer.cc
   src/sstable_reader.cc
-  src/bloomfilter.cc)
+  src/bloomfilter.cc
+  src/MANIFEST.cc
+  src/Manifest_reader.cc
+  src/Manifest_writer.cc)
 target_include_directories(minilsm PUBLIC include)
 
 add_executable(memtable_test tests/memtable_test.cc)
@@ -97,3 +100,7 @@ gtest_discover_tests(sstable_test)
 add_executable(bloomfilter_test tests/bloomfilter_test.cc)
 target_link_libraries(bloomfilter_test minilsm GTest::gtest_main)
 gtest_discover_tests(bloomfilter_test)
+
+add_executable(manifest_test tests/manifest_test.cc)
+target_link_libraries(manifest_test minilsm GTest::gtest_main)
+gtest_discover_tests(manifest_test)

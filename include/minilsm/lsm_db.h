@@ -13,6 +13,7 @@
 #include "minilsm/db.h"
 #include "minilsm/memtable.h"
 #include "minilsm/wal_writer.h"
+#include "minilsm/manifest.h"
 
 namespace minilsm {
 
@@ -53,6 +54,8 @@ private:
 
   void PanicDatabase(Status failure_reason);
 
+
+  Manifest Manifest_;
  
 
  public:

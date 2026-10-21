@@ -358,10 +358,10 @@ TEST_F(FlushTest, SizeTriggerFlushesAndKeepsAllKeys) {
     ASSERT_TRUE(db_->Put(k, v).ok());
     model[k] = v;
   }
-  EXPECT_GE(Ssts().size(), 2u) << "75 entries (~3x the limit in total) must have flushed at least twice";
-  EXPECT_EQ(Wals().size(), 1u);
   for (auto& kv : model) Expect(kv.first, kv.second);
   Close();
+  EXPECT_GE(Ssts().size(), 2u) << "75 entries (~3x the limit in total) must have flushed at least twice";
+  EXPECT_EQ(Wals().size(), 1u);
   Open(kLimit);
   for (auto& kv : model) Expect(kv.first, kv.second);
 }

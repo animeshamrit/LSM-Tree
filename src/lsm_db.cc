@@ -5,6 +5,8 @@
 #include "minilsm/sstable_writer.h"
 #include "minilsm/sstable_reader.h"
 #include "minilsm/bloomfilter.h"
+#include "minilsm/manifest_reader.h"
+#include "minilsm/manifest_writer.h"
 
 #include <filesystem>
 #include <system_error>
@@ -136,11 +138,36 @@ Status LSMDB::Open(const std::string& dir, bool sync,
   db->dir_ = dir;
   db->sync_ = sync;
 
-  std::vector<uint64_t> ssts, wals;
-  Status s = ScanDirectory(dir, &ssts, &wals);
-  if (!s.ok()) return s;
+  Manifest& manifest = db->Manifest_;
+  Status s = ReadManifestFile(dir + "/MANIFEST", &manifest);
+  if(!s.ok() && !s.IsNotFound()) {
+    return s;
+  }
 
-  for (uint64_t n : ssts) {
+  std::vector<uint64_t> ssts, wals;
+  Status status = ScanDirectory(dir, &ssts, &wals);
+  if (!status.ok()) return status;
+
+  if (s.IsNotFound()) {
+    manifest.set_sstable_filenum(ssts);          
+  } 
+  else {
+    const auto live = manifest.get_sstable_filenum(); 
+    for (uint64_t n : ssts)
+        if (!std::binary_search(live.begin(), live.end(), n))
+        ::unlink(SstPath(dir, n).c_str());        // unlisted = orphan
+  }
+
+  for(uint64_t n: manifest.get_sstable_filenum()) {
+    auto it  = lower_bound(ssts.begin(),ssts.end(),n);
+    if(it == ssts.end() || *it != n) {
+        return Status::Corruption("missing sstable files");
+    }
+  }
+  const uint64_t highest = ssts.empty() ? 0 : ssts.back();
+  db->next_sst_number_ = std::max(manifest.get_max_sstable_filenum(), highest) + 1;
+
+  for (uint64_t n : manifest.get_sstable_filenum()) {
     BloomFilterView bloomfilter_view;
     s = ReadBloomFilterBlock(SstPath(dir, n), &bloomfilter_view);
     if (!s.ok()) return s;
@@ -148,15 +175,7 @@ Status LSMDB::Open(const std::string& dir, bool sync,
     bloomfilter_.sst_filenum =  n;
     db->bloomfilters_.push_back(std::move(bloomfilter_));
   }  
-  db->next_sst_number_ = ssts.empty() ? 1 : ssts.back() + 1;
-
-//   for (uint64_t n : ssts) {
-//     SstableView view;
-//     s = ReadSstableFile(SstPath(dir, n), &view);
-//     if (!s.ok()) return s;
-//     db->sstables_.push_back(std::move(view));
-//   }
-//   db->next_sst_number_ = ssts.empty() ? 1 : ssts.back() + 1;
+  //db->next_sst_number_ = Manifest_.get_max_sstable_filenum() + 1;
 
   for (size_t i = 0; i < wals.size(); ++i) {
     const std::string wal_path = WalPath(dir, wals[i]);
@@ -266,7 +285,7 @@ Status LSMDB::FlushMemTableToSstable() {
     if(!s.ok()){
         return s;
     }
-    
+
     uint64_t current_wal_number;
     {
         std::lock_guard<std::mutex> lock(wal_mutex_);
@@ -297,8 +316,28 @@ Status LSMDB::FlushMemTableToSstable() {
             return; 
         }
 
+        std::unique_ptr<ManifestWriter> manifest_w;
+        s = ManifestWriter::Open(this->dir_ + "/MANIFEST", &manifest_w);
+        if(!s.ok()) {
+            this->PanicDatabase(s); 
+            return; 
+        }
+
+        Manifest Manifest_temp = this->Manifest_;
+        Manifest_temp.set_max_sstable_filenum(current_sst_number_);
+        std::vector< uint64_t >v = Manifest_temp.get_sstable_filenum();
+        v.push_back(current_sst_number_);
+        Manifest_temp.set_sstable_filenum(v);
+
+        s = manifest_w->WriteManifest(Manifest_temp);
+        if (!s.ok()) {
+            this->PanicDatabase(s); 
+            return; 
+        }
+
         {
             std::lock_guard<std::mutex> lock(sstable_mutex);
+            this->Manifest_ = Manifest_temp;
             this->sstables_.pop_front();
         }
         this->ClearWal(current_wal_number);
